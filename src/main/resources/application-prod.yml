@@ -1,0 +1,32 @@
+
+spring:
+  # Conexion a la base de datos de produccion: SIEMPRE por variables de entorno,
+  # sin valores por defecto para evitar arrancar con credenciales erroneas.
+  r2dbc:
+    url: ${DATABASE_URL}
+    username: ${DATABASE_USERNAME}
+    password: ${DATABASE_PASSWORD}
+    pool:
+      # Parametros de rendimiento para carga real.
+      initial-size: ${DB_POOL_INITIAL_SIZE:10}
+      max-size: ${DB_POOL_MAX_SIZE:50}
+      max-idle-time: 30m
+      validation-query: SELECT 1
+
+# Logs controlados (sin ruido) para el entorno real.
+logging:
+  level:
+    root: WARN
+    pe.edu.vallegrande.sigrc.product: INFO
+    org.springframework.web: WARN
+    org.springframework.r2dbc: WARN
+    org.springframework.data.r2dbc: WARN
+    io.r2dbc.postgresql: WARN
+  pattern:
+    console: "%d{yyyy-MM-dd HH:mm:ss} - %msg%n"
+
+# Parametros de servidor para produccion.
+server:
+  shutdown: graceful
+  netty:
+    connection-timeout: 5s

@@ -1,0 +1,23 @@
+
+spring:
+
+  r2dbc:
+    url: ${DATABASE_URL:r2dbc:postgresql://localhost:5432/sigrc_product_dev}
+    username: ${DATABASE_USERNAME:postgres}
+    password: ${DATABASE_PASSWORD:postgres}
+    pool:
+      # Pool pequeno para pruebas locales.
+      initial-size: 2
+      max-size: 5
+
+# Logs mas detallados para depuracion local, incluido SQL y trazas R2DBC.
+logging:
+  level:
+    root: INFO
+    pe.edu.vallegrande.sigrc.product: DEBUG
+    org.springframework.web: DEBUG
+    org.springframework.r2dbc: DEBUG
+    org.springframework.data.r2dbc: DEBUG
+    io.r2dbc.postgresql: WARN
+  pattern:
+    console: "%d{yyyy-MM-dd HH:mm:ss} - %msg%n"

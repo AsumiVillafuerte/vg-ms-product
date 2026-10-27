@@ -1,0 +1,20 @@
+services:
+
+  ms-products:
+    image: asumi27/ms-products:latest
+    container_name: ms-products-service
+
+    ports:
+      - "8086:8086"
+
+    environment:
+      DATABASE_URL: ${DATABASE_URL}
+      DATABASE_USERNAME: ${DATABASE_USERNAME}
+      DATABASE_PASSWORD: ${DATABASE_PASSWORD}
+
+    networks:
+      - products-network
+
+networks:
+  products-network:
+    driver: bridge

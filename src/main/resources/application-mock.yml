@@ -1,0 +1,14 @@
+
+# Perfil de pruebas de carga: datos en memoria (sin PostgreSQL ni Keycloak).
+spring:
+  r2dbc:
+    pool:
+      # No abrir conexiones al arrancar: los repositorios en memoria son los que responden.
+      initial-size: 0
+
+logging:
+  level:
+    root: INFO
+    pe.edu.vallegrande.sigrc.product: INFO
+    org.springframework.r2dbc: WARN
+    io.r2dbc.postgresql: WARN

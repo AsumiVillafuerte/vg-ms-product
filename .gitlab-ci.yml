@@ -1,0 +1,228 @@
+stages:
+  - test
+  - sonar
+  - docker
+  - deploy
+  - notify
+
+variables:
+  SERVICE_NAME: "vg-ms-products"
+  SLACK_CHANNEL: "#jenkins"
+  MAVEN_OPTS: "-Dmaven.repo.local=.m2/repository"
+  DOCKER_TLS_CERTDIR: ""
+  DOCKER_DRIVER: overlay2
+  DOCKER_IMAGE: "ms-products"
+  CONTAINER_NAME: "vg-ms-sigrc-products"
+  COMPOSE_SERVICE: "vg-ms-sigrc-products"
+  # SonarCloud: guarda la caché del analizador y clona con historial completo
+  SONAR_USER_HOME: "${CI_PROJECT_DIR}/.sonar"
+  GIT_DEPTH: "0"
+
+cache:
+  paths:
+    - .m2/repository
+
+test:
+  stage: test
+  image: maven:3.9.6-eclipse-temurin-17
+  script:
+    - |
+      REPORTS_DIR="target/surefire-reports"
+      rm -rf "$REPORTS_DIR"
+
+      set +e
+      mvn -q test
+      MVN_EXIT=$?
+      set -e
+
+      if ! ls "$REPORTS_DIR"/TEST-*.xml >/dev/null 2>&1; then
+        echo "=============================================="
+        echo "No fue posible validar las pruebas: no se generaron reportes JUnit en $REPORTS_DIR."
+        echo "Estado: ROJO - SIN EVIDENCIA DE PRUEBAS"
+        echo "=============================================="
+        exit 1
+      fi
+
+      SUMMARY=$(awk '
+        function attr(line, name,   v) {
+          if (match(line, name "=\"[0-9]+\"")) {
+            v = substr(line, RSTART, RLENGTH)
+            sub(name "=\"", "", v)
+            sub(/"/, "", v)
+            return v + 0
+          }
+          return 0
+        }
+        /<testsuite / {
+          total += attr($0, "tests")
+          failures += attr($0, "failures")
+          errors += attr($0, "errors")
+          skipped += attr($0, "skipped")
+        }
+        END { printf "%d %d %d %d\n", total, failures, errors, skipped }
+      ' "$REPORTS_DIR"/TEST-*.xml) || {
+        echo "=============================================="
+        echo "No fue posible validar las pruebas: los reportes JUnit no se pudieron leer."
+        echo "Estado: ROJO - REPORTES ILEGIBLES"
+        echo "=============================================="
+        exit 1
+      }
+
+      TOTAL=$(echo "$SUMMARY" | awk '{print $1}')
+      FAILED=$(echo "$SUMMARY" | awk '{print $2}')
+      ERRORS=$(echo "$SUMMARY" | awk '{print $3}')
+      SKIPPED=$(echo "$SUMMARY" | awk '{print $4}')
+      PASSED=$((TOTAL - FAILED - ERRORS - SKIPPED))
+      EXECUTED=$((TOTAL - SKIPPED))
+
+      if [ "$TOTAL" -eq 0 ]; then
+        echo "=============================================="
+        echo "No fue posible validar las pruebas: los reportes no contienen pruebas ejecutadas."
+        echo "Estado: ROJO - SIN PRUEBAS EN LOS REPORTES"
+        echo "=============================================="
+        exit 1
+      fi
+
+      if [ "$EXECUTED" -gt 0 ]; then
+        PCT=$(awk -v passed="$PASSED" -v executed="$EXECUTED" 'BEGIN { printf "%.2f", (passed / executed) * 100 }')
+        PCT_DISPLAY="${PCT} %"
+      else
+        PCT_DISPLAY="N/A (todas omitidas)"
+      fi
+
+      if [ "$MVN_EXIT" -ne 0 ] || [ "$FAILED" -gt 0 ] || [ "$ERRORS" -gt 0 ]; then
+        STATE="ROJO - HAY PRUEBAS FALLIDAS O ERRORES"
+      elif [ "$SKIPPED" -gt 0 ]; then
+        STATE="AMARILLO - HAY PRUEBAS OMITIDAS O ADVERTENCIAS"
+      else
+        STATE="VERDE - TODAS LAS PRUEBAS PASARON"
+      fi
+
+      echo "========== RESUMEN DE PRUEBAS =========="
+      printf "%-12s %s\n" "Total:" "$TOTAL"
+      printf "%-12s %s\n" "Aprobadas:" "$PASSED"
+      printf "%-12s %s\n" "Fallidas:" "$FAILED"
+      printf "%-12s %s\n" "Omitidas:" "$SKIPPED"
+      printf "%-12s %s\n" "Errores:" "$ERRORS"
+      printf "%-12s %s\n" "Aprobación:" "$PCT_DISPLAY"
+      printf "%-12s %s\n" "Estado:" "$STATE"
+      echo "========================================"
+
+      if [ "$MVN_EXIT" -ne 0 ]; then
+        exit "$MVN_EXIT"
+      fi
+      if [ "$FAILED" -gt 0 ] || [ "$ERRORS" -gt 0 ]; then
+        exit 1
+      fi
+  artifacts:
+    when: always
+    expire_in: 1 week
+    paths:
+      - target/surefire-reports/
+    reports:
+      junit:
+        - target/surefire-reports/TEST-*.xml
+  rules:
+    - if: $CI_COMMIT_BRANCH
+
+docker_publish:
+  stage: docker
+  image: docker:27.3.1
+  services:
+    - docker:27.3.1-dind
+  script:
+    - test -n "$DKH_USERNAME"
+    - test -n "$DKH_TOKEN"
+    - printf "%s" "$DKH_TOKEN" | docker login -u "$DKH_USERNAME" --password-stdin
+    - docker build -t "$DKH_USERNAME/$DOCKER_IMAGE:latest" .
+    - docker push "$DKH_USERNAME/$DOCKER_IMAGE:latest"
+  rules:
+    - if: $CI_COMMIT_BRANCH == "main"
+    - if: $CI_COMMIT_BRANCH == "develop"
+
+deploy_vps:
+  stage: deploy
+  image: curlimages/curl:8.10.1
+  needs:
+    - docker_publish
+  script:
+    - curl -fsS -X POST "$DEPLOY_WEBHOOK_URL"
+  rules:
+    - if: '$CI_COMMIT_BRANCH == "main" || $CI_COMMIT_BRANCH == "develop"'
+    - if: "$CI_COMMIT_TAG"
+
+# ANÁLISIS DE CALIDAD (SonarCloud): ejecuta las pruebas con JaCoCo y sube la
+# cobertura al Quality Gate de SonarCloud.
+sonarcloud-check:
+  stage: sonar
+  image: maven:3.9.9-eclipse-temurin-17
+  cache:
+    key: "${CI_JOB_NAME}"
+    paths:
+      - .sonar/cache
+      - .m2/repository
+  script:
+    - |
+      if [ -z "$SONAR_TOKEN" ]; then
+        echo "SONAR_TOKEN no configurado en CI/CD; el analisis no puede autenticarse."
+        exit 1
+      fi
+      mvn -B -ntp verify sonar:sonar \
+        -Dsonar.host.url="${SONAR_HOST_URL:-https://sonarcloud.io}" \
+        -Dsonar.projectKey=asumi-penafiel-villafuerte_vg-ms-products \
+        -Dsonar.organization=asumi-penafiel-villafuerte \
+        -Dsonar.token="$SONAR_TOKEN" \
+        -Dsonar.coverage.jacoco.xmlReportPaths=target/site/jacoco/jacoco.xml
+  rules:
+    - if: '$CI_COMMIT_BRANCH == "main" || $CI_COMMIT_BRANCH == "develop"'
+
+# NOTIFICACIONES DE RESULTADOS (Slack): replica las notificaciones del
+# Jenkinsfile. Requiere la variable CI/CD enmascarada SLACK_WEBHOOK_URL.
+.slack_notify:
+  stage: notify
+  image: curlimages/curl:8.10.1
+  allow_failure: true
+  variables:
+    SLACK_COLOR: "good"
+    SLACK_TITLE: "BUILD"
+    SLACK_STATUS: "SUCCESS"
+    SLACK_DETAILS: ""
+  script:
+    - |
+      if [ -z "$SLACK_WEBHOOK_URL" ]; then
+        echo "SLACK_WEBHOOK_URL no configurado; se omite la notificacion."
+        exit 0
+      fi
+      BRANCH=$(printf '%s' "${CI_COMMIT_REF_NAME:-desconocida}" | sed 's/"/\\"/g')
+      PAYLOAD=$(cat <<EOF
+      {
+        "channel": "${SLACK_CHANNEL}",
+        "attachments": [
+          {
+            "color": "${SLACK_COLOR}",
+            "text": "*${SERVICE_NAME} - ${SLACK_TITLE}*\nRama: ${BRANCH}\nPipeline: #${CI_PIPELINE_IID}\n${SLACK_DETAILS}\nEstado: ${SLACK_STATUS}\n<${CI_PIPELINE_URL}|Ver ejecucion en GitLab>"
+          }
+        ]
+      }
+      EOF
+      )
+      curl -fsS -X POST -H "Content-type: application/json" --data "$PAYLOAD" "$SLACK_WEBHOOK_URL" \
+        || echo "No se pudo notificar a Slack"
+
+notify_success:
+  extends: .slack_notify
+  when: on_success
+  variables:
+    SLACK_COLOR: "good"
+    SLACK_TITLE: "BUILD EXITOSO"
+    SLACK_STATUS: "SUCCESS"
+    SLACK_DETAILS: 'Reporte JaCoCo: generado\nAnalisis enviado a SonarCloud (sin validar Quality Gate)'
+
+notify_failure:
+  extends: .slack_notify
+  when: on_failure
+  variables:
+    SLACK_COLOR: "danger"
+    SLACK_TITLE: "BUILD FALLIDO"
+    SLACK_STATUS: "FAILURE"
+    SLACK_DETAILS: 'Revisa los errores de compilacion, pruebas, docker o despliegue'
